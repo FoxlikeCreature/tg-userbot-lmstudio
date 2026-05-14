@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import json
@@ -35,6 +36,7 @@ GROUP_CONTEXT_SIZE = int(os.getenv("GROUP_CONTEXT_SIZE", "20"))
 SYSTEM_PROMPT     = os.getenv("SYSTEM_PROMPT", "Ты — полезный ассистент.")
 SYSTEM_PROMPT_RAG = os.getenv("SYSTEM_PROMPT_RAG", SYSTEM_PROMPT)
 TRIGGER_WORD = os.getenv("TRIGGER_WORD", "лиса")
+_TRIGGER_RE  = re.compile(r"\bлис[ауыеойиёцяь]|\bлис\b|\bрыб", re.IGNORECASE)
 TRIGGER_TAGS = {"@foxlike_creature", "@foxllke_creature"}
 USER_FACTS   = os.getenv("USER_FACTS", "")
 
@@ -566,10 +568,9 @@ async def handle_message(event):
         if reply_msg and reply_msg.sender_id == MY_ID:
             trigger_type = "reply"
 
-    # Слово-триггер
-    if not trigger_type and text_lower.startswith(TRIGGER_WORD):
-        cleaned = text[len(TRIGGER_WORD):].strip()
-        user_text    = cleaned if cleaned else "шо?"
+    # Слово-триггер: лиса/рыба в любой форме, в любом месте сообщения
+    if not trigger_type and _TRIGGER_RE.search(text):
+        user_text    = text
         trigger_type = "word"
 
     # Вопрос пока онлайн
