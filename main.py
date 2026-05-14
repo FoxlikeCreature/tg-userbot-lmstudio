@@ -59,7 +59,7 @@ MY_ID: int | None = None
 
 chat_histories:    dict[int, list[dict]] = {}
 message_counters:  dict[int, int] = {}
-online_mode_until: float | None = None
+online_mode_until: dict[int, float] = {}  # chat_id -> timestamp
 chat_message_log:  dict[int, list[bool]] = {}
 followup_user_id:  dict[int, int] = {}
 followup_expires:  dict[int, float] = {}
@@ -282,12 +282,12 @@ def estimate_typing_time(text: str) -> float:
     return max(1.5, len(text) / 390 * 60)
 
 
-def calculate_group_delay(trigger_type: str) -> float:
+def calculate_group_delay(trigger_type: str, chat_id: int) -> float:
     if trigger_type in ("tag", "question", "followup"):
         return 0.0
     if trigger_type == "random_online":
         return 0.0
-    if online_mode_until and time.time() < online_mode_until:
+    if online_mode_until.get(chat_id, 0) > time.time():
         return 0.0
     if random.random() < IMMEDIATE_CHANCE:
         return 0.0
@@ -326,8 +326,7 @@ async def send_idle_message(chat_id: int) -> None:
     phrase = get_random_phrase()
     try:
         await client.send_message(chat_id, phrase)
-        global online_mode_until
-        online_mode_until = time.time() + ONLINE_WINDOW
+        online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
         if chat_id not in chat_message_log:
             chat_message_log[chat_id] = []
         chat_message_log[chat_id].append(True)
@@ -396,16 +395,12 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
     pending_tasks[chat_id].append(task)
 
     try:
-        global online_mode_until
-
-        delay = calculate_group_delay(trigger_type) if is_group else 0.0
+        delay = calculate_group_delay(trigger_type, chat_id) if is_group else 0.0
         if delay > 0:
             logger.info(f"Задержка {delay:.1f}с для чата {chat_id}")
             await asyncio.sleep(delay)
 
-        if trigger_type == "random_online" and (
-            not online_mode_until or time.time() >= online_mode_until
-        ):
+        if trigger_type == "random_online" and online_mode_until.get(chat_id, 0) <= time.time():
             logger.info(f"random_online отменён — онлайн-режим истёк для чата {chat_id}")
             return
 
@@ -483,7 +478,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
                 logger.info(f"Split-reply в чат {chat_id}: {second[:60]}")
 
         if trigger_type != "random_online":
-            online_mode_until = time.time() + ONLINE_WINDOW
+            online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
 
         if is_group:
             schedule_idle_message(chat_id)
@@ -596,8 +591,7 @@ async def handle_message(event):
     if not trigger_type:
         if (
             is_group
-            and online_mode_until
-            and time.time() < online_mode_until
+            and online_mode_until.get(chat_id, 0) > time.time()
             and random.random() < online_chance(chat_id)
         ):
             trigger_type = "random_online"
