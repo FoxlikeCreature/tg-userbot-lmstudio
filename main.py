@@ -44,6 +44,7 @@ MAX_DELAY    = 600
 ONLINE_WINDOW = 600
 IDLE_BASE    = 14400
 IDLE_RANDOM_MAX = 600
+SPLIT_CHANCE = 0.30
 
 _LOCATION_KEYWORDS = {
     "где", "живёшь", "живешь", "живу", "находишься", "страна", "город",
@@ -75,8 +76,19 @@ group_message_buffer: dict[int, list[dict]] = {}
 
 def _get_sender_name(event) -> str:
     sid = event.sender_id
-    if sid not in _user_names and event.sender:
-        _user_names[sid] = event.sender.first_name or event.sender.username or str(sid)
+    if sid is None:
+        return "Аноним"
+    if sid not in _user_names:
+        sender = event.sender
+        if sender:
+            # Channel objects have 'title', User objects have 'first_name'
+            name = (
+                getattr(sender, "first_name", None)
+                or getattr(sender, "title", None)
+                or getattr(sender, "username", None)
+                or str(sid)
+            )
+            _user_names[sid] = name
     return _user_names.get(sid, str(sid))
 
 
@@ -230,6 +242,33 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
         return ""
 
 
+def _query_split_reply(chat_id: int, first_reply: str) -> str:
+    """Короткое продолжение первого ответа — как будто вспомнила что-то."""
+    history = get_chat_history(chat_id)
+    continuation_prompt = (
+        "Ты только что написала это сообщение. Напиши одно короткое дополнение — "
+        "буквально 3-8 слов, как будто вспомнила деталь или хочется добавить реакцию. "
+        "Не повторяй сказанное, не объясняй."
+    )
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history[-MAX_HISTORY:])
+    messages.append({"role": "user", "content": continuation_prompt})
+    try:
+        resp = requests.post(
+            f"{LM_STUDIO_URL}/v1/chat/completions",
+            json={"model": MODEL, "messages": messages, "temperature": TEMPERATURE},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        second = resp.json()["choices"][0]["message"]["content"]
+        if history and history[-1]["role"] == "assistant":
+            history[-1]["content"] = first_reply + "\n" + second
+        return second
+    except Exception as e:
+        logger.warning(f"Ошибка split-reply для чата {chat_id}: {e}")
+        return ""
+
+
 def online_chance(chat_id: int) -> float:
     n = messages_since_reply.get(chat_id, 99)
     if n <= 1: return 0.50
@@ -245,7 +284,7 @@ def calculate_group_delay(trigger_type: str) -> float:
     if trigger_type in ("tag", "question", "followup"):
         return 0.0
     if trigger_type == "random_online":
-        return random.uniform(MIN_DELAY, MAX_DELAY)
+        return 0.0
     if online_mode_until and time.time() < online_mode_until:
         return 0.0
     if random.random() < IMMEDIATE_CHANCE:
@@ -355,10 +394,18 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
     pending_tasks[chat_id].append(task)
 
     try:
+        global online_mode_until
+
         delay = calculate_group_delay(trigger_type) if is_group else 0.0
         if delay > 0:
             logger.info(f"Задержка {delay:.1f}с для чата {chat_id}")
             await asyncio.sleep(delay)
+
+        if trigger_type == "random_online" and (
+            not online_mode_until or time.time() >= online_mode_until
+        ):
+            logger.info(f"random_online отменён — онлайн-режим истёк для чата {chat_id}")
+            return
 
         if is_group and trigger_type == "followup":
             ladder_bullets[chat_id] = [user_text]
@@ -412,8 +459,28 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
                 await asyncio.sleep(e.seconds)
                 await client.send_message(chat_id, chunk)
 
+        # Split-сообщение с шансом 30%
+        if random.random() < SPLIT_CHANCE:
+            second = await asyncio.to_thread(_query_split_reply, chat_id, reply)
+            if second:
+                await asyncio.sleep(random.uniform(1.0, 3.0))
+                typing2 = asyncio.create_task(keep_typing(chat_id, 30))
+                await asyncio.sleep(estimate_typing_time(second))
+                typing2.cancel()
+                try:
+                    await typing2
+                except asyncio.CancelledError:
+                    pass
+                try:
+                    await client.send_message(chat_id, second)
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds)
+                    await client.send_message(chat_id, second)
+                if is_group:
+                    _append_group_ctx(chat_id, "лиса", second)
+                logger.info(f"Split-reply в чат {chat_id}: {second[:60]}")
+
         if trigger_type != "random_online":
-            global online_mode_until
             online_mode_until = time.time() + ONLINE_WINDOW
 
         if is_group:
@@ -427,8 +494,9 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
             chat_message_log[chat_id] = chat_message_log[chat_id][-5:]
 
         messages_since_reply[chat_id] = 0
-        followup_user_id[chat_id]  = event.sender_id
-        followup_expires[chat_id]  = time.time() + 60
+        if event.sender_id is not None:
+            followup_user_id[chat_id] = event.sender_id
+            followup_expires[chat_id] = time.time() + 60
 
     except asyncio.CancelledError:
         logger.info(f"Задача отменена для чата {chat_id}")
@@ -443,7 +511,11 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
 async def handle_message(event):
     if not event.message.text:
         return
-    if event.sender_id is None or event.sender_id == MY_ID:
+    if event.sender_id == MY_ID:
+        return
+    # Анонимный пост (sender_id=None, напр. канал без аккаунта) —
+    # обрабатываем только реплаи, всё остальное игнорируем
+    if event.sender_id is None and not event.message.is_reply:
         return
 
     chat_id   = event.chat_id
