@@ -34,6 +34,7 @@ MAX_HISTORY  = int(os.getenv("MAX_HISTORY", "20"))
 SYSTEM_PROMPT     = os.getenv("SYSTEM_PROMPT", "Ты — полезный ассистент.")
 SYSTEM_PROMPT_RAG = os.getenv("SYSTEM_PROMPT_RAG", SYSTEM_PROMPT)
 TRIGGER_WORD = os.getenv("TRIGGER_WORD", "лиса")
+TRIGGER_TAGS = {"@foxlike_creature", "@foxllke_creature"}
 USER_FACTS   = os.getenv("USER_FACTS", "")
 
 IMMEDIATE_CHANCE = 0.2
@@ -208,7 +209,7 @@ def estimate_typing_time(text: str) -> float:
 
 
 def calculate_group_delay(trigger_type: str) -> float:
-    if trigger_type in ("question", "followup"):
+    if trigger_type in ("tag", "question", "followup"):
         return 0.0
     if trigger_type == "random_online":
         return random.uniform(MIN_DELAY, MAX_DELAY)
@@ -281,11 +282,11 @@ async def ladder_wait(chat_id: int, messages: list[str]) -> list[str]:
     return messages
 
 
-async def keep_typing(chat_id: int, duration: float, interval: float = 4.0) -> None:
+async def keep_typing(peer, duration: float, interval: float = 4.0) -> None:
     elapsed = 0.0
     while elapsed < duration:
         try:
-            await client(SetTypingRequest(chat_id, SendMessageTypingAction()))
+            await client(SetTypingRequest(peer=peer, action=SendMessageTypingAction()))
         except Exception:
             pass
         sleep_time = min(interval, duration - elapsed)
@@ -304,8 +305,9 @@ def is_followup(sender_id: int, chat_id: int) -> bool:
 
 
 async def process_message(event, user_text: str, trigger_type: str, counter_snapshot: int) -> None:
-    chat_id = event.chat_id
-    is_group = not event.is_private
+    chat_id   = event.chat_id
+    input_peer = event.input_chat
+    is_group  = not event.is_private
     task = asyncio.current_task()
     if chat_id not in pending_tasks:
         pending_tasks[chat_id] = []
@@ -342,7 +344,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
         await asyncio.sleep(random.uniform(2.5, 4.5))
 
         model_task  = asyncio.create_task(asyncio.to_thread(query_lm_studio, chat_id, final_text))
-        typing_task = asyncio.create_task(keep_typing(chat_id, 300))
+        typing_task = asyncio.create_task(keep_typing(input_peer, 300))
         reply = await model_task
         typing_task.cancel()
         try:
@@ -357,7 +359,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
         await asyncio.sleep(estimate_typing_time(reply))
 
         try:
-            await client(SetTypingRequest(chat_id, SendMessageTypingAction()))
+            await client(SetTypingRequest(peer=input_peer, action=SendMessageTypingAction()))
         except Exception:
             pass
 
@@ -404,7 +406,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
 async def handle_message(event):
     if not event.message.text:
         return
-    if event.sender_id == MY_ID:
+    if event.sender_id is None or event.sender_id == MY_ID:
         return
 
     chat_id   = event.chat_id
@@ -430,8 +432,19 @@ async def handle_message(event):
     trigger_type = None
     user_text    = text
 
+    # Абсолютный приоритет: тег аккаунта (@Foxlike_creature / @Foxllke_creature)
+    text_lower = text.lower()
+    for tag in TRIGGER_TAGS:
+        if tag in text_lower:
+            cleaned = text
+            for t in TRIGGER_TAGS:
+                cleaned = cleaned.replace(t, "").replace(t.upper(), "").replace(t.capitalize(), "")
+            user_text    = cleaned.strip() if cleaned.strip() else "шо?"
+            trigger_type = "tag"
+            break
+
     # ЛС — всегда отвечаем
-    if is_private:
+    if not trigger_type and is_private:
         trigger_type = "reply"
 
     # Реплай на моё сообщение
@@ -441,7 +454,7 @@ async def handle_message(event):
             trigger_type = "reply"
 
     # Слово-триггер
-    if not trigger_type and text.lower().startswith(TRIGGER_WORD):
+    if not trigger_type and text_lower.startswith(TRIGGER_WORD):
         cleaned = text[len(TRIGGER_WORD):].strip()
         user_text    = cleaned if cleaned else "шо?"
         trigger_type = "word"
@@ -496,13 +509,20 @@ async def main() -> None:
     resolve_model()
     load_rag_index()
 
+    await client.connect()
+    try:
+        me = await client.get_me()
+        if me is None:
+            raise RuntimeError("get_me() вернул None")
+    except Exception as e:
+        logger.error(f"Сессия не авторизована: {e} — запусти auth.py вручную")
+        sys.exit(1)
+
     global MY_ID
-    me = await client.get_me()
     MY_ID = me.id
     logger.info(f"Юзербот запущен: {me.first_name} (@{me.username}), ID: {me.id}")
 
     await client.run_until_disconnected()
 
 
-with client:
-    client.loop.run_until_complete(main())
+asyncio.run(main())
