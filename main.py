@@ -31,6 +31,7 @@ LM_STUDIO_URL = os.getenv("LM_STUDIO_URL")
 MODEL        = os.getenv("MODEL", "auto")
 TEMPERATURE  = float(os.getenv("TEMPERATURE", "0.7"))
 MAX_HISTORY  = int(os.getenv("MAX_HISTORY", "20"))
+GROUP_CONTEXT_SIZE = int(os.getenv("GROUP_CONTEXT_SIZE", "20"))
 SYSTEM_PROMPT     = os.getenv("SYSTEM_PROMPT", "Ты — полезный ассистент.")
 SYSTEM_PROMPT_RAG = os.getenv("SYSTEM_PROMPT_RAG", SYSTEM_PROMPT)
 TRIGGER_WORD = os.getenv("TRIGGER_WORD", "лиса")
@@ -67,7 +68,30 @@ messages_since_reply: dict[int, int] = {}
 pending_tasks:     dict[int, list[asyncio.Task]] = {}
 idle_timers:       dict[int, asyncio.Task] = {}
 
-_peer_cache: dict[int, object] = {}
+_peer_cache:  dict[int, object] = {}
+_user_names:  dict[int, str] = {}
+group_message_buffer: dict[int, list[dict]] = {}
+
+
+def _get_sender_name(event) -> str:
+    sid = event.sender_id
+    if sid not in _user_names and event.sender:
+        _user_names[sid] = event.sender.first_name or event.sender.username or str(sid)
+    return _user_names.get(sid, str(sid))
+
+
+def _append_group_ctx(chat_id: int, name: str, text: str) -> None:
+    buf = group_message_buffer.setdefault(chat_id, [])
+    buf.append({"name": name, "text": text})
+    if len(buf) > GROUP_CONTEXT_SIZE:
+        del buf[:-GROUP_CONTEXT_SIZE]
+
+
+def _format_group_ctx(chat_id: int, exclude_text: str) -> str:
+    buf = group_message_buffer.get(chat_id, [])
+    lines = [f"[{m['name']}]: {m['text']}" for m in buf if m["text"] != exclude_text]
+    return "\n".join(lines) if lines else ""
+
 
 rag_index:      dict | None = None
 _rag_matrix     = None
@@ -178,6 +202,13 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
     fact = personal_fact_hint(user_message)
     if fact:
         system_content += f"\n\n[факт о себе: {fact}]"
+    group_ctx = _format_group_ctx(chat_id, user_message)
+    if group_ctx:
+        system_content += (
+            "\n\n--- Последние сообщения в чате ---\n"
+            + group_ctx
+            + "\n---"
+        )
     messages = [{"role": "system", "content": system_content}]
     messages.extend(history[-MAX_HISTORY:])
     messages.append({"role": "user", "content": user_message})
@@ -387,6 +418,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
 
         if is_group:
             schedule_idle_message(chat_id)
+            _append_group_ctx(chat_id, "лиса", reply)
 
         if chat_id not in chat_message_log:
             chat_message_log[chat_id] = []
@@ -433,6 +465,10 @@ async def handle_message(event):
 
     if is_group and chat_id not in idle_timers:
         schedule_idle_message(chat_id)
+
+    # Записать в групповой буфер контекста
+    if is_group:
+        _append_group_ctx(chat_id, _get_sender_name(event), text)
 
     trigger_type = None
     user_text    = text
