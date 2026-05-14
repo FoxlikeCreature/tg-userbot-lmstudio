@@ -10,8 +10,6 @@ import unicodedata
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
-from telethon.tl.functions.messages import SetTypingRequest
-from telethon.tl.types import SendMessageTypingAction
 import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -282,16 +280,14 @@ async def ladder_wait(chat_id: int, messages: list[str]) -> list[str]:
     return messages
 
 
-async def keep_typing(peer, duration: float, interval: float = 4.0) -> None:
-    elapsed = 0.0
-    while elapsed < duration:
-        try:
-            await client(SetTypingRequest(peer=peer, action=SendMessageTypingAction()))
-        except Exception:
-            pass
-        sleep_time = min(interval, duration - elapsed)
-        await asyncio.sleep(sleep_time)
-        elapsed += sleep_time
+async def keep_typing(chat_id: int, duration: float) -> None:
+    try:
+        async with client.action(chat_id, 'typing'):
+            await asyncio.sleep(duration)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"Typing error в чате {chat_id}: {e}")
 
 
 def is_followup(sender_id: int, chat_id: int) -> bool:
@@ -305,9 +301,8 @@ def is_followup(sender_id: int, chat_id: int) -> bool:
 
 
 async def process_message(event, user_text: str, trigger_type: str, counter_snapshot: int) -> None:
-    chat_id   = event.chat_id
-    input_peer = event.input_chat
-    is_group  = not event.is_private
+    chat_id  = event.chat_id
+    is_group = not event.is_private
     task = asyncio.current_task()
     if chat_id not in pending_tasks:
         pending_tasks[chat_id] = []
@@ -344,7 +339,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
         await asyncio.sleep(random.uniform(2.5, 4.5))
 
         model_task  = asyncio.create_task(asyncio.to_thread(query_lm_studio, chat_id, final_text))
-        typing_task = asyncio.create_task(keep_typing(input_peer, 300))
+        typing_task = asyncio.create_task(keep_typing(chat_id, 300))
         reply = await model_task
         typing_task.cancel()
         try:
@@ -357,11 +352,6 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
             return
 
         await asyncio.sleep(estimate_typing_time(reply))
-
-        try:
-            await client(SetTypingRequest(peer=input_peer, action=SendMessageTypingAction()))
-        except Exception:
-            pass
 
         chunks = [reply[i:i + 4000] for i in range(0, len(reply), 4000)]
         for chunk in chunks:
