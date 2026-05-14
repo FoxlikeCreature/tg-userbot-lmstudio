@@ -10,6 +10,8 @@ import unicodedata
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
+from telethon.tl.functions.messages import SetTypingRequest
+from telethon.tl.types import SendMessageTypingAction
 import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -64,6 +66,8 @@ ladder_counter:    dict[int, int] = {}
 messages_since_reply: dict[int, int] = {}
 pending_tasks:     dict[int, list[asyncio.Task]] = {}
 idle_timers:       dict[int, asyncio.Task] = {}
+
+_peer_cache: dict[int, object] = {}
 
 rag_index:      dict | None = None
 _rag_matrix     = None
@@ -280,14 +284,25 @@ async def ladder_wait(chat_id: int, messages: list[str]) -> list[str]:
     return messages
 
 
-async def keep_typing(chat_id: int, duration: float) -> None:
-    try:
-        async with client.action(chat_id, 'typing'):
-            await asyncio.sleep(duration)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.warning(f"Typing error в чате {chat_id}: {e}")
+async def keep_typing(chat_id: int, duration: float, interval: float = 4.0) -> None:
+    if chat_id not in _peer_cache:
+        try:
+            _peer_cache[chat_id] = await client.get_input_entity(chat_id)
+        except Exception as e:
+            logger.warning(f"Не удалось получить peer для typing {chat_id}: {e}")
+            return
+    peer = _peer_cache[chat_id]
+    elapsed = 0.0
+    while elapsed < duration:
+        try:
+            await client(SetTypingRequest(peer=peer, action=SendMessageTypingAction()))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Typing send error {chat_id}: {e}")
+        sleep_time = min(interval, duration - elapsed)
+        await asyncio.sleep(sleep_time)
+        elapsed += sleep_time
 
 
 def is_followup(sender_id: int, chat_id: int) -> bool:
