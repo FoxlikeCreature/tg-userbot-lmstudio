@@ -110,8 +110,8 @@ def _format_group_ctx(chat_id: int, exclude_text: str) -> str:
 rag_index:      dict | None = None
 _rag_matrix     = None
 _rag_vectorizer = None
-RAG_TOP_K          = 8
-RAG_MIN_SCORE      = 0.20
+RAG_TOP_K          = 16
+RAG_MIN_SCORE      = 0.15
 RAG_CONTEXT_MAX_LEN = 5000
 
 
@@ -163,7 +163,11 @@ def enrich_with_rag(query: str) -> str:
     for idx in top:
         if sims[idx] < RAG_MIN_SCORE:
             continue
-        text = rag_index["pairs"][idx]["response"] if version >= 2 else rag_index["chunks"][idx]["text"]
+        if version >= 2:
+            pair = rag_index["pairs"][idx]
+            text = f"[{pair['query']}] → {pair['response']}"
+        else:
+            text = rag_index["chunks"][idx]["text"]
         key = text[:60].lower()
         if key in seen:
             continue
@@ -209,8 +213,9 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
     system_content = SYSTEM_PROMPT_RAG if rag_context else SYSTEM_PROMPT
     if rag_context:
         system_content += (
-            "\n\n---\nВот как ты отвечала в похожих ситуациях "
-            "(это твои реальные слова — держись этого стиля и лексики):\n\n"
+            "\n\n---\nВот как ты отвечала в похожих ситуациях — "
+            "это твои реальные слова, они важнее общих правил выше. "
+            "Копируй лексику, длину, тон:\n\n"
             + rag_context + "\n---"
         )
     fact = personal_fact_hint(user_message)
@@ -562,6 +567,14 @@ async def handle_message(event):
             _peer_cache[chat_id] = await event.get_input_chat()
         except Exception as e:
             logger.warning(f"Не удалось закешировать peer для {chat_id}: {e}")
+
+    # Отметить сообщение как прочитанное (двойная галочка у собеседника)
+    try:
+        await client.send_read_acknowledge(
+            _peer_cache.get(chat_id, chat_id), event.message
+        )
+    except Exception:
+        pass
 
     increment_counter(chat_id)
     messages_since_reply[chat_id] = messages_since_reply.get(chat_id, 0) + 1
