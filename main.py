@@ -46,7 +46,7 @@ MAX_DELAY    = 600
 ONLINE_WINDOW = 600
 IDLE_BASE    = 10800
 IDLE_RANDOM_MAX = 600
-SPLIT_CHANCE = 0.30
+SPLIT_CHANCE = 0.20
 
 _LOCATION_KEYWORDS = {
     "где", "живёшь", "живешь", "живу", "находишься", "страна", "город",
@@ -213,9 +213,7 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
     system_content = SYSTEM_PROMPT_RAG if rag_context else SYSTEM_PROMPT
     if rag_context:
         system_content += (
-            "\n\n---\nВот как ты отвечала в похожих ситуациях — "
-            "это твои реальные слова, они важнее общих правил выше. "
-            "Копируй лексику, длину, тон:\n\n"
+            "\n\n---\nПримеры твоих ответов в похожих ситуациях — ориентируйся на эту лексику и тон:\n\n"
             + rag_context + "\n---"
         )
     fact = personal_fact_hint(user_message)
@@ -250,24 +248,30 @@ def query_lm_studio(chat_id: int, user_message: str) -> str:
 
 
 def _query_split_reply(chat_id: int, first_reply: str) -> str:
-    """Короткое продолжение первого ответа — как будто вспомнила что-то."""
+    """Короткое продолжение первого ответа строго по теме разговора."""
     history = get_chat_history(chat_id)
+    last_user_msg = next(
+        (m["content"] for m in reversed(history) if m["role"] == "user"), ""
+    )
     continuation_prompt = (
-        "Ты только что написала это сообщение. Напиши одно короткое дополнение — "
-        "буквально 3-8 слов, как будто вспомнила деталь или хочется добавить реакцию. "
-        "Не повторяй сказанное, не объясняй."
+        f"Ты только что написала: «{first_reply}»\n"
+        f"Собеседник говорил о: «{last_user_msg[:120]}»\n\n"
+        "Если хочется добавить одну короткую мысль строго по этой теме — напиши её (3–8 слов). "
+        "Если добавить нечего по существу — ответь только: -"
     )
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history[-MAX_HISTORY:])
+    messages.extend(history[-6:])
     messages.append({"role": "user", "content": continuation_prompt})
     try:
         resp = requests.post(
             f"{LM_STUDIO_URL}/v1/chat/completions",
-            json={"model": MODEL, "messages": messages, "temperature": TEMPERATURE},
+            json={"model": MODEL, "messages": messages, "temperature": 0.4},
             timeout=60,
         )
         resp.raise_for_status()
-        second = resp.json()["choices"][0]["message"]["content"]
+        second = resp.json()["choices"][0]["message"]["content"].strip()
+        if not second or second in ("-", "–", "—") or len(second) < 3:
+            return ""
         if history and history[-1]["role"] == "assistant":
             history[-1]["content"] = first_reply + "\n" + second
         return second
