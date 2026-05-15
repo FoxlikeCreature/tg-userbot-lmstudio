@@ -324,8 +324,9 @@ async def send_idle_message(chat_id: int) -> None:
         schedule_idle_message(chat_id)
         return
     phrase = get_random_phrase()
+    peer = _peer_cache.get(chat_id, chat_id)
     try:
-        await client.send_message(chat_id, phrase)
+        await client.send_message(peer, phrase)
         online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
         if chat_id not in chat_message_log:
             chat_message_log[chat_id] = []
@@ -443,18 +444,19 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
 
         await asyncio.sleep(estimate_typing_time(reply))
 
+        peer = _peer_cache.get(chat_id, chat_id)
         chunks = [reply[i:i + 4000] for i in range(0, len(reply), 4000)]
         for chunk in chunks:
             has_new = get_message_counter(chat_id) > counter_snapshot
             try:
                 if is_group and has_new:
-                    await client.send_message(chat_id, chunk, reply_to=final_msg_id)
+                    await client.send_message(peer, chunk, reply_to=final_msg_id)
                 else:
-                    await client.send_message(chat_id, chunk)
+                    await client.send_message(peer, chunk)
             except FloodWaitError as e:
                 logger.warning(f"FloodWait {e.seconds}с — ждём")
                 await asyncio.sleep(e.seconds)
-                await client.send_message(chat_id, chunk)
+                await client.send_message(peer, chunk)
 
         # Split-сообщение с шансом 30%
         if random.random() < SPLIT_CHANCE:
@@ -469,10 +471,10 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
                 except asyncio.CancelledError:
                     pass
                 try:
-                    await client.send_message(chat_id, second)
+                    await client.send_message(peer, second)
                 except FloodWaitError as e:
                     await asyncio.sleep(e.seconds)
-                    await client.send_message(chat_id, second)
+                    await client.send_message(peer, second)
                 if is_group:
                     _append_group_ctx(chat_id, "лиса", second)
                 logger.info(f"Split-reply в чат {chat_id}: {second[:60]}")
@@ -520,6 +522,14 @@ async def handle_message(event):
     text      = event.message.text
     is_private = event.is_private
     is_group   = not is_private
+
+    # Кешируем InputPeer из входящего события — гарантированно резолвится,
+    # в отличие от client.get_input_entity(user_id) для новых пользователей
+    if chat_id not in _peer_cache:
+        try:
+            _peer_cache[chat_id] = await event.get_input_chat()
+        except Exception as e:
+            logger.warning(f"Не удалось закешировать peer для {chat_id}: {e}")
 
     increment_counter(chat_id)
     messages_since_reply[chat_id] = messages_since_reply.get(chat_id, 0) + 1
