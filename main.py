@@ -398,7 +398,7 @@ async def ladder_wait(chat_id: int, messages: list[str]) -> list[str]:
     return messages
 
 
-async def keep_typing(chat_id: int, duration: float, interval: float = 4.0) -> None:
+async def keep_typing(chat_id: int, duration: float, interval: float = 8.0) -> None:
     if chat_id not in _peer_cache:
         try:
             _peer_cache[chat_id] = await client.get_input_entity(chat_id)
@@ -472,7 +472,7 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
         await asyncio.sleep(random.uniform(2.5, 4.5))
 
         model_task  = asyncio.create_task(asyncio.to_thread(query_lm_studio, chat_id, final_text))
-        typing_task = asyncio.create_task(keep_typing(chat_id, 300))
+        typing_task = asyncio.create_task(keep_typing(chat_id, 45))
         try:
             reply = await model_task
         finally:
