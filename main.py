@@ -468,12 +468,14 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
 
         model_task  = asyncio.create_task(asyncio.to_thread(query_lm_studio, chat_id, final_text))
         typing_task = asyncio.create_task(keep_typing(chat_id, 300))
-        reply = await model_task
-        typing_task.cancel()
         try:
-            await typing_task
-        except asyncio.CancelledError:
-            pass
+            reply = await model_task
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
 
         if not reply:
             logger.info(f"Пустой ответ для чата {chat_id}")
