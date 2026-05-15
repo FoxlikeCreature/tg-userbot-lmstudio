@@ -44,7 +44,7 @@ IMMEDIATE_CHANCE = 0.2
 MIN_DELAY    = 180
 MAX_DELAY    = 600
 ONLINE_WINDOW = 600
-IDLE_BASE    = 14400
+IDLE_BASE    = 10800
 IDLE_RANDOM_MAX = 600
 SPLIT_CHANCE = 0.30
 
@@ -271,6 +271,37 @@ def _query_split_reply(chat_id: int, first_reply: str) -> str:
         return ""
 
 
+def _query_idle_message(chat_id: int) -> str:
+    """Генерирует спонтанное сообщение через LLM с учётом последних сообщений чата."""
+    buf = group_message_buffer.get(chat_id, [])
+    ctx_lines = [f"[{m['name']}]: {m['text']}" for m in buf[-5:]]
+    ctx = "\n".join(ctx_lines)
+    idle_prompt = (
+        "Посмотри на последние сообщения в чате. "
+        "Напиши одну короткую мысль — своё мнение, реакцию или наблюдение. "
+        "Не обращайся ни к кому напрямую, не отвечай на конкретный вопрос. "
+        "Пиши как будто вспомнила что-то или захотела поделиться. "
+        "5–15 слов, без точки в конце."
+    )
+    if ctx:
+        idle_prompt = f"Последние сообщения в чате:\n{ctx}\n\n{idle_prompt}"
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": idle_prompt},
+    ]
+    try:
+        resp = requests.post(
+            f"{LM_STUDIO_URL}/v1/chat/completions",
+            json={"model": MODEL, "messages": messages, "temperature": TEMPERATURE},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"Ошибка генерации idle-сообщения: {e}")
+        return get_random_phrase()
+
+
 def online_chance(chat_id: int) -> float:
     n = messages_since_reply.get(chat_id, 99)
     if n <= 1: return 0.50
@@ -323,7 +354,8 @@ async def send_idle_message(chat_id: int) -> None:
         logger.info(f"Idle пропущено — последнее уже от меня, ждём ещё {IDLE_BASE}с")
         schedule_idle_message(chat_id)
         return
-    phrase = get_random_phrase()
+    phrase = await asyncio.to_thread(_query_idle_message, chat_id)
+    logger.info(f"Idle-сообщение в чат {chat_id}: {phrase[:60]}")
     peer = _peer_cache.get(chat_id, chat_id)
     try:
         await client.send_message(peer, phrase)
@@ -567,11 +599,13 @@ async def handle_message(event):
     if not trigger_type and is_private:
         trigger_type = "reply"
 
-    # Реплай на моё сообщение
+    # Реплай на моё сообщение — включить цитируемый текст в контекст
     if not trigger_type and event.message.is_reply:
         reply_msg = await event.message.get_reply_message()
         if reply_msg and reply_msg.sender_id == MY_ID:
             trigger_type = "reply"
+            if reply_msg.text:
+                user_text = f"[Ты ранее написала: {reply_msg.text}]\n\n{text}"
 
     # Слово-триггер: лиса/рыба в любой форме, в любом месте сообщения
     if not trigger_type and _TRIGGER_RE.search(text):
