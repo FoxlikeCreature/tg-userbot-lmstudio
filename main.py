@@ -495,6 +495,9 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
                 await asyncio.sleep(e.seconds)
                 await client.send_message(peer, chunk)
 
+        if trigger_type != "random_online":
+            online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
+
         # Split-сообщение с шансом 30%
         if random.random() < SPLIT_CHANCE:
             second = await asyncio.to_thread(_query_split_reply, chat_id, reply)
@@ -515,9 +518,6 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
                 if is_group:
                     _append_group_ctx(chat_id, "лиса", second)
                 logger.info(f"Split-reply в чат {chat_id}: {second[:60]}")
-
-        if trigger_type != "random_online":
-            online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
 
         if is_group:
             schedule_idle_message(chat_id)
@@ -655,7 +655,7 @@ async def handle_message(event):
         else:
             return
 
-    logger.info(f"Триггер {trigger_type}: {user_text[:60]}")
+    logger.info(f"[{chat_id}] Триггер {trigger_type}: {user_text[:60]}")
 
     # Сбросить лесенку и followup при новом триггере
     ladder_bullets.pop(chat_id, None)
