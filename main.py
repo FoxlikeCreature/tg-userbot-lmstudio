@@ -543,6 +543,26 @@ async def process_message(event, user_text: str, trigger_type: str, counter_snap
                 del pending_tasks[chat_id]
 
 
+@client.on(events.ChatAction)
+async def handle_chat_action(event):
+    if MY_ID is None:
+        return
+    joined = False
+    if event.user_joined and event.sender_id == MY_ID:
+        joined = True
+    elif event.user_added:
+        try:
+            users = await event.get_users()
+            if any(u.id == MY_ID for u in users):
+                joined = True
+        except Exception:
+            pass
+    if joined:
+        chat_id = event.chat_id
+        online_mode_until[chat_id] = time.time() + ONLINE_WINDOW
+        logger.info(f"[{chat_id}] Вступление в чат — онлайн-режим активирован")
+
+
 @client.on(events.NewMessage(incoming=True))
 async def handle_message(event):
     if not event.message.text:
